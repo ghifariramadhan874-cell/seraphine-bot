@@ -1,0 +1,947 @@
+# ============================================================
+#  BOT DISCORD AI — SERAPHINE (PROFESSIONAL VERSION)
+# ============================================================
+#
+#  SETUP:
+#  1. Buat file .env di folder yang sama dengan bot.py
+#  2. Isi DISCORD_TOKEN, OPENROUTER_API_KEY, NEWSAPI_KEY
+#  3. pip install discord.py requests python-dotenv
+#  4. python bot.py
+#
+# ============================================================
+
+import discord
+import requests
+import sqlite3
+import logging
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+from collections import defaultdict
+import time
+from better_profanity import profanity
+
+# Load environment variables
+load_dotenv()
+
+# ============================================================
+#  CONFIGURATION
+# ============================================================
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+MOD_LOG_CHANNEL_NAME = os.getenv("MOD_LOG_CHANNEL", "mod-logs")
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+NEWSAPI_BASE_URL = "https://newsapi.org/v2"
+AI_MODEL = "openai/gpt-3.5-turbo"
+
+DB_NAME = "bot_memory.db"
+MAX_HISTORY_MESSAGES = 2  # Context messages (optimized)
+MAX_DB_MESSAGES = 20  # Total stored per user
+PREFIX = "!"
+RATE_LIMIT_SECONDS = 5  # Per user rate limit
+RESPONSE_CHAR_LIMIT = 1900  # Discord message limit
+
+# Store mod log channels per guild
+mod_log_channels = {}
+
+# Personality
+KEPRIBADIAN = (
+    "Kamu adalah bot Discord bernama Seraphine AI yang asik, santai, dan ramah. "
+    "Nama mu adalah Seraphine AI. Jika ditanya siapa nama mu atau siapa kamu, jawab 'Saya adalah Seraphine AI'. "
+    "Pembuat mu adalah Notzee - hanya sebut ini jika ditanya langsung siapa pembuat mu. "
+    "PENTING SEKALI: Di SETIAP jawaban, MULAI dengan menyebutkan nama user yang bertanya. Contoh: 'Yo {username}, ...' atau '{username}, itu dia ...'. "
+    "PENTING: Ketika menjawab pertanyaan, berikan jawaban yang DETAIL, PANJANG, dan MENJELASKAN dengan baik. "
+    "Berikan penjelasan yang komprehensif, contoh konkret jika diperlukan. "
+    "PENTING: Ketika diminta buatin code/coding, LANGSUNG berikan code lengkap dengan format code block (```python atau ```javascript dll). "
+    "Jawab pakai bahasa Indonesia yang gaul tapi sopan. "
+    "Prioritaskan kualitas jawaban dan detail penjelasan daripada singkat."
+)
+
+# ============================================================
+#  LOGGING SETUP
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================
+#  PROFANITY FILTER SETUP
+# ============================================================
+
+profanity.load_censor_words()
+
+# Custom toxic keywords untuk Indonesia
+CUSTOM_TOXIC_WORDS = [
+    "anjing", "babi", "monyet", "setan", "bangsat", "kontol", "memek", 
+    "biadab", "tolol", "dungu", "goblok", "bodoh", "sampah", "hina",
+    "jelek", "buruk", "sial", "sinting", "sarap"
+]
+
+# Add custom words to profanity filter
+profanity.add_censor_words(CUSTOM_TOXIC_WORDS)
+
+def contains_toxic(text: str) -> bool:
+    """Check if text contains toxic content (hybrid method)."""
+    text_lower = text.lower()
+    
+    # Method 1: better-profanity library check
+    if profanity.contains_profanity(text):
+        return True
+    
+    # Method 2: Custom keyword check
+    for word in CUSTOM_TOXIC_WORDS:
+        if word in text_lower:
+            return True
+    
+    return False
+
+async def get_or_create_mod_log_channel(guild: discord.Guild) -> discord.TextChannel:
+    """Get existing mod log channel or create if not exists."""
+    try:
+        # Check if already cached
+        if guild.id in mod_log_channels:
+            channel = guild.get_channel(mod_log_channels[guild.id])
+            if channel:
+                return channel
+        
+        # Look for existing mod-logs channel
+        for channel in guild.text_channels:
+            if channel.name == MOD_LOG_CHANNEL_NAME:
+                mod_log_channels[guild.id] = channel.id
+                logger.info(f"Found existing mod log channel in {guild.name}")
+                return channel
+        
+        # Create new mod-logs channel if not exists
+        logger.info(f"Creating mod log channel in {guild.name}")
+        
+        # Create with restricted permissions (admin/mod only)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        }
+        
+        channel = await guild.create_text_channel(
+            MOD_LOG_CHANNEL_NAME,
+            overwrites=overwrites,
+            topic="🔒 Moderator logs - Toxic messages, kicks, warnings"
+        )
+        
+        mod_log_channels[guild.id] = channel.id
+        logger.info(f"Created new mod log channel in {guild.name}")
+        return channel
+        
+    except discord.Forbidden:
+        logger.error(f"No permission to create channel in {guild.name}")
+        return None
+    except Exception as e:
+        logger.error(f"Error creating mod log channel: {e}")
+        return None
+
+async def log_toxic_message(guild: discord.Guild, user: discord.Member, message_content: str, channel_name: str):
+    """Log toxic message to mod log channel."""
+    try:
+        mod_channel = await get_or_create_mod_log_channel(guild)
+        if not mod_channel:
+            logger.warning("Could not get mod log channel")
+            return
+        
+        embed = discord.Embed(
+            title="⚠️ Toxic Message Detected",
+            color=0xFF5733,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(name="👤 User", value=f"{user.mention} ({user.name}#{user.discriminator})", inline=False)
+        embed.add_field(name="💬 Channel", value=f"#{channel_name}", inline=False)
+        embed.add_field(name="📝 Message", value=f"```{message_content[:500]}```" if len(message_content) < 500 else f"```{message_content[:497]}...```", inline=False)
+        embed.add_field(name="🆔 User ID", value=str(user.id), inline=True)
+        embed.add_field(name="⏰ Time", value=datetime.now().strftime("%d %b %Y %H:%M:%S"), inline=True)
+        
+        embed.set_thumbnail(url=user.avatar.url if user.avatar else None)
+        
+        await mod_channel.send(embed=embed)
+        logger.info(f"Toxic message logged from {user.name} in {guild.name}")
+        
+    except Exception as e:
+        logger.error(f"Error logging toxic message: {e}")
+
+# ============================================================
+#  RATE LIMITER
+# ============================================================
+
+user_last_request = defaultdict(float)
+
+def check_rate_limit(user_id: int) -> bool:
+    """Check if user has exceeded rate limit."""
+    current_time = time.time()
+    last_request = user_last_request.get(user_id, 0)
+    
+    if current_time - last_request < RATE_LIMIT_SECONDS:
+        return False
+    
+    user_last_request[user_id] = current_time
+    return True
+
+# ============================================================
+#  DISCORD CLIENT SETUP
+# ============================================================
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.presences = True
+
+client = discord.Client(intents=intents)
+
+# ============================================================
+#  DATABASE FUNCTIONS
+# ============================================================
+
+def init_db():
+    """Initialize database."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        
+        # Conversation table
+        c.execute('''CREATE TABLE IF NOT EXISTS conversation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            user_message TEXT NOT NULL,
+            bot_response TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Infraction table (warn, kick, ban, etc)
+        c.execute('''CREATE TABLE IF NOT EXISTS infractions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            moderator_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+
+def save_conversation(user_id: int, user_msg: str, bot_response: str):
+    """Save conversation to database."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('INSERT INTO conversation (user_id, user_message, bot_response) VALUES (?, ?, ?)',
+                  (user_id, user_msg, bot_response))
+        conn.commit()
+        
+        # Clean up old messages (keep only MAX_DB_MESSAGES per user)
+        c.execute('''DELETE FROM conversation WHERE id IN (
+            SELECT id FROM conversation WHERE user_id = ? 
+            ORDER BY id DESC LIMIT -1 OFFSET ?
+        )''', (user_id, MAX_DB_MESSAGES))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error saving conversation: {e}")
+
+def add_infraction(guild_id: int, user_id: int, moderator_id: int, action_type: str, reason: str):
+    """Add infraction record (warn, kick, ban, etc)."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''INSERT INTO infractions (guild_id, user_id, moderator_id, action_type, reason) 
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (guild_id, user_id, moderator_id, action_type, reason))
+        conn.commit()
+        conn.close()
+        logger.info(f"Infraction added: {action_type} for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error adding infraction: {e}")
+
+def get_user_infractions(guild_id: int, user_id: int) -> list:
+    """Get all infractions for a user in a guild."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''SELECT action_type, reason, timestamp, moderator_id FROM infractions 
+                     WHERE guild_id = ? AND user_id = ? 
+                     ORDER BY timestamp DESC''',
+                  (guild_id, user_id))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"Error getting infractions: {e}")
+        return []
+
+def get_user_history(user_id: int, limit: int = MAX_HISTORY_MESSAGES) -> str:
+    """Get user conversation history (optimized)."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        # Fetch exact limit needed, not more
+        c.execute('''SELECT user_message, bot_response FROM conversation 
+                     WHERE user_id = ? ORDER BY id DESC LIMIT ?''',
+                  (user_id, limit))
+        rows = c.fetchall()
+        conn.close()
+        
+        if not rows:
+            return ""
+        
+        history = []
+        for user_msg, bot_resp in reversed(rows):
+            history.append(f"User: {user_msg}\nBot: {bot_resp}")
+        
+        return "\n\n".join(history)
+    except Exception as e:
+        logger.error(f"Error getting history: {e}")
+        return ""
+
+# ============================================================
+#  NEWS FUNCTIONS
+# ============================================================
+
+def fetch_trending_news() -> str:
+    """Fetch trending news from NewsAPI with fallback."""
+    try:
+        url = f"{NEWSAPI_BASE_URL}/everything"
+        params = {
+            "q": "Indonesia OR viral OR trending",
+            "sortBy": "publishedAt",
+            "language": "id",
+            "pageSize": 5,
+            "apiKey": NEWSAPI_KEY
+        }
+        
+        logger.info("Fetching trending news...")
+        res = requests.get(url, params=params, timeout=10)
+        hasil = res.json()
+        
+        if hasil.get("status") != "ok":
+            error_msg = hasil.get("message", "Unknown error")
+            logger.warning(f"NewsAPI error: {error_msg}")
+            return f"⚠️ Gak bisa fetch berita: {error_msg}"
+        
+        articles = hasil.get("articles", [])
+        if not articles:
+            return "⚠️ Gak ada berita trending saat ini 😅"
+        
+        berita_text = "🔥 **Berita Trending Hari Ini:**\n\n"
+        for i, article in enumerate(articles, 1):
+            title = article.get("title", "No title")
+            desc = article.get("description", "No description")
+            source = article.get("source", {}).get("name", "Unknown")
+            
+            if desc and len(desc) > 120:
+                desc = desc[:120] + "..."
+            
+            berita_text += f"**{i}. {title}**\n"
+            berita_text += f"   {desc}\n"
+            berita_text += f"   *Sumber: {source}*\n\n"
+        
+        logger.info("News fetched successfully")
+        return berita_text
+        
+    except requests.exceptions.Timeout:
+        logger.warning("News API timeout")
+        return "⚠️ Timeout fetch berita, coba lagi nanti"
+    except Exception as e:
+        logger.error(f"Error fetching news: {e}")
+        return f"⚠️ Error fetch berita: {str(e)[:50]}"
+
+# ============================================================
+#  AI FUNCTIONS (MERGED & OPTIMIZED)
+# ============================================================
+
+def tanya_ai(pertanyaan: str, user_id: int, user_name: str, include_trending: bool = False) -> str:
+    """
+    Send question to OpenRouter with optional trending news context.
+    Merged function replacing both tanya_ai and tanya_ai_dengan_trending.
+    """
+    try:
+        # Build context
+        context_parts = [KEPRIBADIAN]
+        
+        if include_trending:
+            berita = fetch_trending_news()
+            context_parts.append(f"Berita Trending Saat Ini:\n{berita}")
+        
+        history = get_user_history(user_id)
+        if history:
+            context_parts.append(f"Recent context:\n{history}")
+        
+        context_parts.append(f"User {user_name} bertanya: {pertanyaan}")
+        full_prompt = "\n\n".join(context_parts)
+        
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://discord.com",
+            "X-Title": "Seraphine AI Bot"
+        }
+        
+        data = {
+            "model": AI_MODEL,
+            "messages": [{"role": "user", "content": full_prompt}],
+            "temperature": 0.7,
+            "max_tokens": 1500
+        }
+        
+        logger.info(f"Requesting AI response for user {user_id}")
+        res = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            json=data,
+            headers=headers,
+            timeout=60
+        )
+        hasil = res.json()
+        
+        if "error" in hasil:
+            error_msg = hasil["error"].get("message", "Unknown error")
+            logger.error(f"OpenRouter error: {error_msg}")
+            return f"❌ Duh, AI error: {error_msg[:100]}"
+        
+        balasan = hasil.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        
+        if balasan:
+            save_conversation(user_id, pertanyaan, balasan)
+            logger.info(f"Response saved for user {user_id}")
+            return balasan
+        else:
+            return "❌ Hmm, gua gabisa jawab pertanyaan itu 😅"
+        
+    except requests.exceptions.Timeout:
+        logger.warning("OpenRouter timeout")
+        return "⏱️ AI sedang load, coba lagi dalam beberapa detik"
+    except requests.exceptions.ConnectionError:
+        logger.error("Connection error to OpenRouter")
+        return "🌐 Internet error, coba lagi nanti"
+    except Exception as e:
+        logger.error(f"Unexpected error in tanya_ai: {e}")
+        return f"❌ Error: {str(e)[:50]}"
+
+# ============================================================
+#  FORMATTING FUNCTIONS
+# ============================================================
+
+def create_response_embed(title: str, description: str, color: int = 0x7289da) -> discord.Embed:
+    """Create a formatted embed response."""
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=datetime.now()
+    )
+    return embed
+
+def truncate_response(text: str, limit: int = RESPONSE_CHAR_LIMIT) -> str:
+    """Truncate response if too long."""
+    if len(text) > limit:
+        return text[:limit-20] + "\n\n*... (pesan kepanjangan)*"
+    return text
+
+# ============================================================
+#  MODERATION FUNCTIONS
+# ============================================================
+
+async def kick_user(member: discord.Member, reason: str = "No reason provided", moderator_id: int = None) -> tuple[bool, str]:
+    """Kick a user from server and log infraction."""
+    try:
+        if member.bot:
+            return False, "❌ Tidak bisa kick bot!"
+        
+        if member.guild_permissions.administrator:
+            return False, "❌ Tidak bisa kick admin!"
+        
+        await member.kick(reason=reason)
+        
+        # Log infraction
+        if moderator_id:
+            add_infraction(member.guild.id, member.id, moderator_id, "KICK", reason)
+        
+        logger.info(f"Kicked user {member.name} for reason: {reason}")
+        return True, f"✅ User {member.name} berhasil di-kick\nAlasan: {reason}"
+    except discord.Forbidden:
+        return False, "❌ Bot tidak punya permission untuk kick user ini"
+    except Exception as e:
+        logger.error(f"Error kicking user: {e}")
+        return False, f"❌ Error kick user: {str(e)[:50]}"
+
+async def send_announcement(channel: discord.TextChannel, title: str, message: str, 
+                           mention_role: str = None, pin: bool = True) -> tuple[bool, str]:
+    """Send announcement to channel."""
+    try:
+        mention_text = ""
+        if mention_role:
+            mention_text = f"{mention_role}\n"
+        
+        embed = discord.Embed(
+            title=f"📢 {title}",
+            description=message,
+            color=0xFF5733,
+            timestamp=datetime.now()
+        )
+        embed.set_footer(text="Official Announcement")
+        
+        msg = await channel.send(f"{mention_text}", embed=embed)
+        
+        if pin:
+            await msg.pin()
+        
+        logger.info(f"Announcement sent to {channel.name}")
+        return True, f"✅ Announcement sent ke channel {channel.mention}"
+    except discord.Forbidden:
+        return False, "❌ Bot tidak punya permission di channel ini"
+    except Exception as e:
+        logger.error(f"Error sending announcement: {e}")
+        return False, f"❌ Error send announcement: {str(e)[:50]}"
+
+# ============================================================
+#  PERMISSION CHECKS
+# ============================================================
+
+def has_server_permission(user: discord.User, guild: discord.Guild) -> bool:
+    """Check if user has permission to run server commands."""
+    try:
+        member = guild.get_member(user.id)
+        if member is None:
+            logger.warning(f"Could not find member {user.id} in guild {guild.id}")
+            return False
+        
+        # Check owner
+        if user.id == guild.owner_id:
+            logger.info(f"User {user.name} is server owner")
+            return True
+        
+        # Check admin permission
+        if member.guild_permissions.administrator:
+            logger.info(f"User {user.name} has admin permission")
+            return True
+        
+        logger.warning(f"User {user.name} does not have admin permission")
+        return False
+    except Exception as e:
+        logger.error(f"Error checking permissions for {user.id}: {e}")
+        return False
+
+def is_moderator(member: discord.Member) -> bool:
+    """Check if member is moderator (admin or has Moderator role)."""
+    if member.guild_permissions.administrator or member.guild_permissions.moderate_members:
+        return True
+    
+    # Check if has Moderator role
+    for role in member.roles:
+        if role.name.lower() in ["moderator", "mod", "admin"]:
+            return True
+    
+    return False
+
+# ============================================================
+#  DISCORD EVENTS
+# ============================================================
+
+@client.event
+async def on_ready():
+    logger.info("=" * 50)
+    logger.info(f"✅ BOT ONLINE: {client.user}")
+    logger.info("Bot siap diajak ngobrol!")
+    logger.info("=" * 50)
+    
+    # Set status
+    await client.change_presence(
+        activity=discord.Activity(type=discord.ActivityType.listening, name="!help")
+    )
+
+@client.event
+async def on_message(pesan):
+    if pesan.author.bot:
+        return
+    
+    # ============================================================
+    #  TOXIC MESSAGE AUTO-DELETE (SEMUA MESSAGE)
+    # ============================================================
+    if contains_toxic(pesan.content):
+        logger.warning(f"Toxic message detected from {pesan.author.name}: {pesan.content[:50]}")
+        
+        try:
+            # Log ke mod channel
+            await log_toxic_message(pesan.guild, pesan.author, pesan.content, pesan.channel.name)
+            
+            # Delete message
+            await pesan.delete()
+            
+            # DM user
+            embed = discord.Embed(
+                title="⚠️ Pesan Dihapus",
+                description=f"Halo {pesan.author.name}, pesan mu mengandung kata-kata yang tidak sopan.\nMohon jaga bahasa yang baik di server ini 😊",
+                color=0xFF5733,
+                timestamp=datetime.now()
+            )
+            
+            await pesan.author.send(embed=embed)
+            logger.info(f"Toxic message deleted and user notified")
+        except discord.Forbidden:
+            logger.warning("Cannot delete toxic message or DM user (permission denied)")
+            try:
+                await pesan.reply("⚠️ Pesan mu mengandung kata-kata tidak sopan. Mohon jaga bahasa yang baik!", delete_after=5)
+            except:
+                pass
+        except Exception as e:
+            logger.error(f"Error handling toxic message: {e}")
+        
+        return
+    
+    # ============================================================
+    #  RATE LIMIT CHECK
+    # ============================================================
+    if not check_rate_limit(pesan.author.id):
+        logger.warning(f"Rate limit hit for user {pesan.author.id}")
+        return
+    
+    isi = pesan.content.strip()
+    pertanyaan = None
+    command = None
+    
+    # Parse command atau mention
+    if isi.startswith(PREFIX):
+        pertanyaan = isi[len(PREFIX):].strip()
+        if pertanyaan:
+            command = pertanyaan.split()[0].lower()
+    elif client.user in pesan.mentions:
+        pertanyaan = isi.replace(f"<@{client.user.id}>", "").strip()
+    
+    if not pertanyaan:
+        return
+    
+    logger.info(f"Message from {pesan.author.name}: {pertanyaan[:50]}")
+    
+    # ============================================================
+    #  HELP COMMAND
+    # ============================================================
+    if command == "help":
+        embed = discord.Embed(
+            title="📚 Seraphine AI Bot - Command List",
+            color=0x7289da,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="💬 AI Chat",
+            value="`!<pertanyaan>` - Tanya apa aja\n`@Seraphine AI <pertanyaan>` - Mention bot",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📰 News",
+            value="`!trending` - Lihat berita trending",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔨 Moderation (Admin/Mod)",
+            value="`!kick @user reason` - Kick user dari server\n`!infractions @user` - Lihat history moderasi user\n`!announce [title] | [message]` - Send announcement",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🖥️ Server (Admin only)",
+            value="`!server-info` - Info server\n`!member-list` - Top 20 members\n`!channel-list` - Daftar channels\n`!role-list` - Daftar roles",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="ℹ️ Bot Info",
+            value=f"Dibuat oleh: **Notzee**\nNama: **Seraphine AI**\nModel: **GPT-3.5-Turbo**",
+            inline=False
+        )
+        
+        embed.set_footer(text="Ketik !help lagi untuk lihat command ini")
+        await pesan.reply(embed=embed)
+        return
+    
+    # ============================================================
+    #  TRENDING COMMAND
+    # ============================================================
+    if command == "trending":
+        async with pesan.channel.typing():
+            jawaban = tanya_ai(
+                "Apa yang trending hari ini? Berikan penjelasan singkat tentang trending topics terkini.",
+                pesan.author.id,
+                pesan.author.name,
+                include_trending=True
+            )
+        
+        jawaban = truncate_response(jawaban)
+        embed = create_response_embed("🔥 Trending Hari Ini", jawaban)
+        await pesan.reply(embed=embed)
+        return
+    
+    # ============================================================
+    #  SERVER INFO COMMAND
+    # ============================================================
+    if command == "server-info":
+        if not has_server_permission(pesan.author, pesan.guild):
+            await pesan.reply("❌ Hanya admin yang bisa pakai command ini")
+            return
+        
+        guild = pesan.guild
+        online = sum(1 for m in guild.members if m.status != discord.Status.offline)
+        offline = guild.member_count - online
+        
+        embed = discord.Embed(
+            title=f"🖥️ Info Server: {guild.name}",
+            color=0x00ff00,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(name="👥 Total Members", value=str(guild.member_count), inline=True)
+        embed.add_field(name="🟢 Online", value=str(online), inline=True)
+        embed.add_field(name="⚫ Offline", value=str(offline), inline=True)
+        embed.add_field(name="📅 Created", value=guild.created_at.strftime("%d %b %Y"), inline=False)
+        embed.add_field(name="👑 Owner", value=f"<@{guild.owner_id}>", inline=False)
+        embed.add_field(name="📋 Roles", value=str(len(guild.roles)), inline=True)
+        embed.add_field(name="💬 Channels", value=str(len(guild.channels)), inline=True)
+        
+        await pesan.reply(embed=embed)
+        return
+    
+    # ============================================================
+    #  MEMBER LIST COMMAND
+    # ============================================================
+    if command == "member-list":
+        if not has_server_permission(pesan.author, pesan.guild):
+            await pesan.reply("❌ Hanya admin yang bisa pakai command ini")
+            return
+        
+        guild = pesan.guild
+        members = "\n".join([f"• {m.name}#{m.discriminator}" for m in guild.members[:20]])
+        
+        embed = discord.Embed(
+            title="👥 Top 20 Members",
+            description=members,
+            color=0x7289da,
+            timestamp=datetime.now()
+        )
+        await pesan.reply(embed=embed)
+        return
+    
+    # ============================================================
+    #  CHANNEL LIST COMMAND
+    # ============================================================
+    if command == "channel-list":
+        if not has_server_permission(pesan.author, pesan.guild):
+            await pesan.reply("❌ Hanya admin yang bisa pakai command ini")
+            return
+        
+        guild = pesan.guild
+        channels = "\n".join([f"• #{c.name}" for c in guild.channels[:15]])
+        
+        embed = discord.Embed(
+            title="💬 Daftar Channels",
+            description=channels,
+            color=0x7289da,
+            timestamp=datetime.now()
+        )
+        await pesan.reply(embed=embed)
+        return
+    
+    # ============================================================
+    #  ROLE LIST COMMAND
+    # ============================================================
+    if command == "role-list":
+        if not has_server_permission(pesan.author, pesan.guild):
+            await pesan.reply("❌ Hanya admin yang bisa pakai command ini")
+            return
+        
+        guild = pesan.guild
+        roles = "\n".join([f"• @{r.name}" for r in guild.roles[:15]])
+        
+        embed = discord.Embed(
+            title="📋 Daftar Roles",
+            description=roles,
+            color=0x7289da,
+            timestamp=datetime.now()
+        )
+        await pesan.reply(embed=embed)
+        return
+    
+    # ============================================================
+    #  KICK COMMAND
+    # ============================================================
+    if command == "kick":
+        member = pesan.guild.get_member(pesan.author.id)
+        if not is_moderator(member):
+            await pesan.reply("❌ Hanya moderator/admin yang bisa kick!")
+            return
+        
+        try:
+            # Parse: !kick @user reason
+            parts = pertanyaan.split()
+            if len(parts) < 2:
+                await pesan.reply("❌ Format: `!kick @user reason`")
+                return
+            
+            # Get mentioned user
+            if pesan.mentions:
+                target = pesan.mentions[0]
+                reason = " ".join(parts[2:]) if len(parts) > 2 else "No reason"
+            else:
+                await pesan.reply("❌ Mention user yang mau di-kick!")
+                return
+            
+            target_member = pesan.guild.get_member(target.id)
+            if not target_member:
+                await pesan.reply("❌ User tidak ditemukan!")
+                return
+            
+            success, msg = await kick_user(target_member, reason, moderator_id=pesan.author.id)
+            
+            embed = discord.Embed(
+                title="🚪 Kick Action",
+                description=msg,
+                color=0xFF5733 if success else 0xFF0000,
+                timestamp=datetime.now()
+            )
+            await pesan.reply(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in kick command: {e}")
+            await pesan.reply(f"❌ Error: {str(e)[:50]}")
+        return
+    
+    # ============================================================
+    #  INFRACTIONS COMMAND (lihat history moderasi user)
+    # ============================================================
+    if command == "infractions":
+        try:
+            # Parse: !infractions @user
+            if not pesan.mentions:
+                await pesan.reply("❌ Format: `!infractions @user`")
+                return
+            
+            target = pesan.mentions[0]
+            infractions = get_user_infractions(pesan.guild.id, target.id)
+            
+            if not infractions:
+                embed = discord.Embed(
+                    title="📋 User Infractions",
+                    description=f"✅ {target.name} tidak punya infraction history",
+                    color=0x00ff00,
+                    timestamp=datetime.now()
+                )
+                await pesan.reply(embed=embed)
+                return
+            
+            embed = discord.Embed(
+                title=f"📋 Infractions - {target.name}#{target.discriminator}",
+                description=f"Total infractions: **{len(infractions)}**",
+                color=0xFF5733,
+                timestamp=datetime.now()
+            )
+            
+            embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
+            
+            for i, (action_type, reason, timestamp, mod_id) in enumerate(infractions[-10:], 1):  # Last 10
+                embed.add_field(
+                    name=f"{i}. {action_type}",
+                    value=f"**Reason:** {reason}\n**Mod:** <@{mod_id}>\n**Date:** {timestamp}",
+                    inline=False
+                )
+            
+            await pesan.reply(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in infractions command: {e}")
+            await pesan.reply(f"❌ Error: {str(e)[:50]}")
+        return
+    
+    # ============================================================
+    #  ANNOUNCE COMMAND
+    # ============================================================
+    if command == "announce":
+        # Check permission directly from message (more reliable)
+        if not pesan.author.guild_permissions.administrator and pesan.author.id != pesan.guild.owner_id:
+            await pesan.reply("❌ Hanya admin yang bisa pakai command ini")
+            logger.warning(f"User {pesan.author.name} tried announce without permission")
+            return
+        
+        try:
+            # Parse: !announce [title] | [message] | [mention:@role]
+            rest = pertanyaan[len("announce"):].strip()
+            
+            if not rest:
+                await pesan.reply("❌ Format: `!announce [title] | [message]`\nContoh: `!announce Maintenance | Server update malam ini`")
+                return
+            
+            parts = rest.split("|")
+            title = parts[0].strip() if len(parts) > 0 else "Announcement"
+            message = parts[1].strip() if len(parts) > 1 else "No message"
+            mention = parts[2].strip() if len(parts) > 2 else None
+            
+            success, msg = await send_announcement(
+                pesan.channel, 
+                title, 
+                message, 
+                mention_role=mention,
+                pin=True
+            )
+            
+            embed = discord.Embed(
+                title="📢 Announcement Posted",
+                description=msg,
+                color=0xFF5733 if success else 0xFF0000,
+                timestamp=datetime.now()
+            )
+            await pesan.reply(embed=embed)
+            logger.info(f"Announcement posted by {pesan.author.name}")
+        except Exception as e:
+            logger.error(f"Error in announce command: {e}")
+            await pesan.reply(f"❌ Error: {str(e)[:50]}")
+        return
+    
+    # ============================================================
+    #  DEFAULT AI CHAT
+    # ============================================================
+    async with pesan.channel.typing():
+        jawaban = tanya_ai(pertanyaan, pesan.author.id, pesan.author.name, include_trending=False)
+    
+    jawaban = truncate_response(jawaban)
+    
+    # Cek apakah response berisi code block
+    if "```" in jawaban:
+        embed = create_response_embed("💬 Jawaban", jawaban)
+    else:
+        embed = create_response_embed("💬 Jawaban", jawaban)
+    
+    await pesan.reply(embed=embed)
+
+# ============================================================
+#  STARTUP
+# ============================================================
+
+if __name__ == "__main__":
+    # Validate environment variables
+    if not DISCORD_TOKEN or not OPENROUTER_API_KEY or not NEWSAPI_KEY:
+        logger.error("❌ Missing environment variables! Check .env file")
+        exit(1)
+    
+    logger.info("Starting bot...")
+    init_db()
+    
+    try:
+        client.run(DISCORD_TOKEN)
+    except Exception as e:
+        logger.critical(f"Failed to start bot: {e}")
+        exit(1)
