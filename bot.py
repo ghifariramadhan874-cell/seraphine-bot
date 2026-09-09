@@ -15,11 +15,59 @@ import requests
 import sqlite3
 import logging
 import os
+import asyncio
+import yt_dlp
 from datetime import datetime
 from dotenv import load_dotenv
 from collections import defaultdict
 import time
 from better_profanity import profanity
+
+# ============================================================
+#  MUSIC PLAYER CONFIG
+# ============================================================
+
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',
+}
+
+ffmpeg_options = {
+    'options': '-vn',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+}
+
+ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
+class YTDLSource(discord.PCMVolumeTransformer):
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title')
+        self.url = data.get('url')
+
+    @classmethod
+    async def from_url(cls, url, *, loop=None, stream=False):
+        loop = loop or asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        
+        if 'entries' in data:
+            data = data['entries'][0]
+
+        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+
+# Antrean musik per server
+music_queues = defaultdict(list)
 
 # Load environment variables
 load_dotenv()
@@ -652,6 +700,12 @@ async def on_message(pesan):
         )
         
         embed.add_field(
+            name="🎵 Music Commands",
+            value="`!play <judul>` - Putar musik dari YouTube\n`!skip` - Lewati lagu\n`!stop` - Stop musik & keluar VC",
+            inline=False
+        )
+        
+        embed.add_field(
             name="🔨 Moderation (Admin/Mod)",
             value="`!kick @user reason` - Kick user dari server\n`!infractions @user` - Lihat history moderasi user\n`!announce [title] | [message]` - Send announcement",
             inline=False
@@ -911,6 +965,65 @@ async def on_message(pesan):
             await pesan.reply(f"❌ Error: {str(e)[:50]}")
         return
     
+    # ============================================================
+    #  MUSIC COMMANDS
+    # ============================================================
+
+    if command == "play":
+        if not pesan.author.voice:
+            await pesan.reply("❌ Kamu harus join voice channel dulu bro!")
+            return
+
+        query = " ".join(pertanyaan.split()[1:])
+        if not query:
+            await pesan.reply("❌ Mau putar lagu apa? Contoh: `!play lirik lagu pupus`")
+            return
+
+        async with pesan.channel.typing():
+            try:
+                # Bot join voice channel jika belum
+                voice_client = pesan.guild.voice_client
+                if not voice_client:
+                    voice_client = await pesan.author.voice.channel.connect()
+
+                player = await YTDLSource.from_url(query, loop=client.loop, stream=True)
+                
+                if not voice_client.is_playing():
+                    voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
+                    embed = discord.Embed(
+                        title="🎵 Sekarang Diputar",
+                        description=f"[{player.title}]({player.url})",
+                        color=0x7289da
+                    )
+                    await pesan.reply(embed=embed)
+                else:
+                    music_queues[pesan.guild.id].append(player)
+                    await pesan.reply(f"✅ Menambahkan ke antrean: **{player.title}**")
+
+            except Exception as e:
+                logger.error(f"Music Error: {e}")
+                await pesan.reply(f"❌ Aduh, error pas putar musik: {str(e)[:100]}")
+        return
+
+    if command == "skip":
+        voice_client = pesan.guild.voice_client
+        if voice_client and voice_client.is_playing():
+            voice_client.stop()
+            await pesan.reply("⏭️ Lagu di-skip!")
+        else:
+            await pesan.reply("❌ Gak ada lagu yang lagi diputar bro.")
+        return
+
+    if command == "stop":
+        voice_client = pesan.guild.voice_client
+        if voice_client:
+            await voice_client.disconnect()
+            music_queues[pesan.guild.id] = []
+            await pesan.reply("🛑 Musik dihentikan dan bot disconnect.")
+        else:
+            await pesan.reply("❌ Bot lagi gak ada di voice channel.")
+        return
+
     # ============================================================
     #  DEFAULT AI CHAT
     # ============================================================
