@@ -114,10 +114,10 @@ def load_bot_config():
             "voice_log_enabled": True
         }
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-MOD_LOG_CHANNEL_NAME = os.getenv("MOD_LOG_CHANNEL", "moderator-only")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
+MOD_LOG_CHANNEL_NAME = os.getenv("MOD_LOG_CHANNEL", "moderator-only").strip()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NEWSAPI_BASE_URL = "https://newsapi.org/v2"
@@ -405,6 +405,7 @@ def init_db():
 def save_conversation(user_id: int, user_msg: str, bot_response: str):
     """Save conversation to database."""
     try:
+        init_db() # Ensure db table exists
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute('INSERT INTO conversation (user_id, user_message, bot_response) VALUES (?, ?, ?)',
