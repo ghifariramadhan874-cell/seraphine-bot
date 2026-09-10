@@ -11,10 +11,12 @@
 # ============================================================
 
 import discord
+from discord import app_commands
 import requests
 import sqlite3
 import logging
 import os
+os.environ["PATH"] += os.pathsep + os.getcwd()
 import asyncio
 import yt_dlp
 from datetime import datetime
@@ -69,6 +71,23 @@ class YTDLSource(discord.PCMVolumeTransformer):
 # Antrean musik per server
 music_queues = defaultdict(list)
 
+def play_next(guild_id, voice_client, channel):
+    if music_queues[guild_id]:
+        next_player = music_queues[guild_id].pop(0)
+        try:
+            voice_client.play(next_player, after=lambda e: play_next(guild_id, voice_client, channel))
+            future = asyncio.run_coroutine_threadsafe(
+                channel.send(embed=discord.Embed(
+                    title="🎵 Sekarang Diputar (Dari Antrean)",
+                    description=f"[{next_player.title}]({next_player.url})",
+                    color=0x7289da
+                )),
+                client.loop
+            )
+            future.result(timeout=5)
+        except Exception as e:
+            logger.error(f"Error in play_next: {e}")
+
 # Load environment variables
 load_dotenv()
 
@@ -76,10 +95,29 @@ load_dotenv()
 #  CONFIGURATION
 # ============================================================
 
+def load_bot_config():
+    if not os.path.exists("config.json"):
+        return {
+            "ai_chat_enabled": True,
+            "music_enabled": True,
+            "automod_enabled": True,
+            "voice_log_enabled": True
+        }
+    try:
+        with open("config.json", "r") as f:
+            return json.load(f)
+    except:
+        return {
+            "ai_chat_enabled": True,
+            "music_enabled": True,
+            "automod_enabled": True,
+            "voice_log_enabled": True
+        }
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-MOD_LOG_CHANNEL_NAME = os.getenv("MOD_LOG_CHANNEL", "mod-logs")
+MOD_LOG_CHANNEL_NAME = os.getenv("MOD_LOG_CHANNEL", "moderator-only")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NEWSAPI_BASE_URL = "https://newsapi.org/v2"
@@ -162,14 +200,14 @@ async def get_or_create_mod_log_channel(guild: discord.Guild) -> discord.TextCha
             if channel:
                 return channel
         
-        # Look for existing mod-logs channel
+        # Look for existing moderator-only or mod-logs channel
         for channel in guild.text_channels:
-            if channel.name == MOD_LOG_CHANNEL_NAME:
+            if channel.name in [MOD_LOG_CHANNEL_NAME, "mod-logs", "moderator-only"]:
                 mod_log_channels[guild.id] = channel.id
                 logger.info(f"Found existing mod log channel in {guild.name}")
                 return channel
         
-        # Create new mod-logs channel if not exists
+        # Create new moderator-only channel if not exists
         logger.info(f"Creating mod log channel in {guild.name}")
         
         # Create with restricted permissions (admin/mod only)
@@ -180,7 +218,7 @@ async def get_or_create_mod_log_channel(guild: discord.Guild) -> discord.TextCha
         channel = await guild.create_text_channel(
             MOD_LOG_CHANNEL_NAME,
             overwrites=overwrites,
-            topic="🔒 Moderator logs - Toxic messages, kicks, warnings"
+            topic="🔒 Moderator logs - Toxic messages, kicks, warnings, voice movements"
         )
         
         mod_log_channels[guild.id] = channel.id
@@ -247,8 +285,86 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.presences = True
+intents.voice_states = True
 
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# ============================================================
+#  MUSIC SLASH COMMANDS
+# ============================================================
+
+@tree.command(name="splay", description="Putar musik dari YouTube (Seraphine)")
+@app_commands.describe(query="Judul lagu atau URL YouTube")
+async def slash_play(interaction: discord.Interaction, query: str):
+    cfg = load_bot_config()
+    if not cfg.get("music_enabled", True):
+        await interaction.response.send_message("❌ Fitur Musik sedang dinonaktifkan via Dashboard bro!", ephemeral=True)
+        return
+
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ Kamu harus join voice channel dulu bro!", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    try:
+        voice_client = interaction.guild.voice_client
+        if not voice_client:
+            voice_client = await interaction.user.voice.channel.connect()
+
+        player = await YTDLSource.from_url(query, loop=client.loop, stream=True)
+        
+        if not voice_client.is_playing():
+            voice_client.play(player, after=lambda e: play_next(interaction.guild.id, voice_client, interaction.channel))
+            embed = discord.Embed(
+                title="🎵 Sekarang Diputar",
+                description=f"[{player.title}]({player.url})",
+                color=0x7289da
+            )
+            await interaction.followup.send(embed=embed)
+        else:
+            music_queues[interaction.guild.id].append(player)
+            await interaction.followup.send(f"✅ Menambahkan ke antrean: **{player.title}** (Urutan ke-{len(music_queues[interaction.guild.id])})")
+
+    except Exception as e:
+        logger.error(f"Music Error: {e}")
+        await interaction.followup.send(f"❌ Aduh, error pas putar musik: {str(e)[:100]}")
+
+@tree.command(name="squeue", description="Lihat antrean musik (Seraphine)")
+async def slash_queue(interaction: discord.Interaction):
+    queue = music_queues.get(interaction.guild.id, [])
+    if not queue:
+        await interaction.response.send_message("📋 Antrean musik kosong bro.", ephemeral=True)
+        return
+    
+    queue_list = "\n".join([f"`{i+1}.` [{p.title}]({p.url})" for i, p in enumerate(queue[:15])])
+    embed = discord.Embed(
+        title="📋 Antrean Musik (Music Queue)",
+        description=queue_list,
+        color=0x7289da,
+        timestamp=datetime.now()
+    )
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="sskip", description="Lewati lagu yang sedang diputar (Seraphine)")
+async def slash_skip(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_playing():
+        voice_client.stop()
+        await interaction.response.send_message("⏭️ Lagu di-skip!")
+    else:
+        await interaction.response.send_message("❌ Gak ada lagu yang lagi diputar bro.", ephemeral=True)
+
+@tree.command(name="sstop", description="Stop musik & keluar voice channel (Seraphine)")
+async def slash_stop(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if voice_client:
+        await voice_client.disconnect()
+        music_queues[interaction.guild.id] = []
+        await interaction.response.send_message("🛑 Musik dihentikan dan bot disconnect.")
+    else:
+        await interaction.response.send_message("❌ Bot lagi gak ada di voice channel.", ephemeral=True)
 
 # ============================================================
 #  DATABASE FUNCTIONS
@@ -609,20 +725,91 @@ async def on_ready():
     logger.info("Bot siap diajak ngobrol!")
     logger.info("=" * 50)
     
+    try:
+        await tree.sync()
+        for guild in client.guilds:
+            tree.copy_global_to(guild=guild)
+            await tree.sync(guild=guild)
+        logger.info("✅ Slash commands synchronized successfully (Global & Guilds)")
+    except Exception as e:
+        logger.error(f"Failed to sync slash commands: {e}")
+    
     # Set status
     await client.change_presence(
         activity=discord.Activity(type=discord.ActivityType.listening, name="!help")
     )
 
 @client.event
+async def on_voice_state_update(member, before, after):
+    cfg = load_bot_config()
+    if not cfg.get("voice_log_enabled", True):
+        return
+
+    if before.channel != after.channel:
+        try:
+            mod_channel = await get_or_create_mod_log_channel(member.guild)
+            if not mod_channel:
+                return
+
+            if before.channel is None and after.channel is not None:
+                # Joined
+                embed = discord.Embed(
+                    title="🎙️ Member Joined Voice",
+                    color=0x2ECC71,
+                    timestamp=datetime.now()
+                )
+                embed.add_field(name="👤 Member", value=f"{member.mention} ({member.name})", inline=False)
+                embed.add_field(name="📁 Channel", value=after.channel.name, inline=False)
+                await mod_channel.send(embed=embed)
+
+            elif before.channel is not None and after.channel is None:
+                # Left
+                embed = discord.Embed(
+                    title="🎙️ Member Left Voice",
+                    color=0xE74C3C,
+                    timestamp=datetime.now()
+                )
+                embed.add_field(name="👤 Member", value=f"{member.mention} ({member.name})", inline=False)
+                embed.add_field(name="📁 Channel", value=before.channel.name, inline=False)
+                await mod_channel.send(embed=embed)
+
+            elif before.channel is not None and after.channel is not None:
+                # Moved
+                moderator = None
+                async for entry in member.guild.audit_logs(action=discord.AuditLogAction.member_move, limit=1):
+                    if entry.target and hasattr(entry.target, 'id') and entry.target.id == member.id and (datetime.now() - entry.created_at.replace(tzinfo=None)).total_seconds() < 5:
+                        moderator = entry.user
+                        break
+                
+                embed = discord.Embed(
+                    title="🎙️ Member Moved in Voice",
+                    color=0x3498DB,
+                    timestamp=datetime.now()
+                )
+                embed.add_field(name="👤 Member", value=f"{member.mention} ({member.name})", inline=False)
+                embed.add_field(name="📁 From", value=before.channel.name, inline=True)
+                embed.add_field(name="📁 To", value=after.channel.name, inline=True)
+                if moderator:
+                    embed.add_field(name="🛡️ Moved By", value=f"{moderator.mention} ({moderator.name})", inline=False)
+                else:
+                    embed.add_field(name="🛡️ Moved By", value="Self", inline=False)
+                
+                await mod_channel.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error in on_voice_state_update: {e}")
+
+@client.event
 async def on_message(pesan):
     if pesan.author.bot:
         return
     
+    cfg = load_bot_config()
+
     # ============================================================
     #  TOXIC MESSAGE AUTO-DELETE (SEMUA MESSAGE)
     # ============================================================
-    if contains_toxic(pesan.content):
+    if cfg.get("automod_enabled", True) and contains_toxic(pesan.content):
         logger.warning(f"Toxic message detected from {pesan.author.name}: {pesan.content[:50]}")
         
         try:
@@ -700,8 +887,8 @@ async def on_message(pesan):
         )
         
         embed.add_field(
-            name="🎵 Music Commands",
-            value="`!play <judul>` - Putar musik dari YouTube\n`!skip` - Lewati lagu\n`!stop` - Stop musik & keluar VC",
+            name="🎵 Music Commands (Slash Commands /)",
+            value="`/splay <judul>` - Putar musik dari YouTube\n`/squeue` - Lihat daftar antrean musik\n`/sskip` - Lewati lagu\n`/sstop` - Stop musik & keluar VC",
             inline=False
         )
         
@@ -966,67 +1153,18 @@ async def on_message(pesan):
         return
     
     # ============================================================
-    #  MUSIC COMMANDS
+    #  MUSIC COMMANDS (REDIRECT KE SLASH COMMAND)
     # ============================================================
-
-    if command == "play":
-        if not pesan.author.voice:
-            await pesan.reply("❌ Kamu harus join voice channel dulu bro!")
-            return
-
-        query = " ".join(pertanyaan.split()[1:])
-        if not query:
-            await pesan.reply("❌ Mau putar lagu apa? Contoh: `!play lirik lagu pupus`")
-            return
-
-        async with pesan.channel.typing():
-            try:
-                # Bot join voice channel jika belum
-                voice_client = pesan.guild.voice_client
-                if not voice_client:
-                    voice_client = await pesan.author.voice.channel.connect()
-
-                player = await YTDLSource.from_url(query, loop=client.loop, stream=True)
-                
-                if not voice_client.is_playing():
-                    voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-                    embed = discord.Embed(
-                        title="🎵 Sekarang Diputar",
-                        description=f"[{player.title}]({player.url})",
-                        color=0x7289da
-                    )
-                    await pesan.reply(embed=embed)
-                else:
-                    music_queues[pesan.guild.id].append(player)
-                    await pesan.reply(f"✅ Menambahkan ke antrean: **{player.title}**")
-
-            except Exception as e:
-                logger.error(f"Music Error: {e}")
-                await pesan.reply(f"❌ Aduh, error pas putar musik: {str(e)[:100]}")
-        return
-
-    if command == "skip":
-        voice_client = pesan.guild.voice_client
-        if voice_client and voice_client.is_playing():
-            voice_client.stop()
-            await pesan.reply("⏭️ Lagu di-skip!")
-        else:
-            await pesan.reply("❌ Gak ada lagu yang lagi diputar bro.")
-        return
-
-    if command == "stop":
-        voice_client = pesan.guild.voice_client
-        if voice_client:
-            await voice_client.disconnect()
-            music_queues[pesan.guild.id] = []
-            await pesan.reply("🛑 Musik dihentikan dan bot disconnect.")
-        else:
-            await pesan.reply("❌ Bot lagi gak ada di voice channel.")
+    if command in ["play", "splay", "queue", "squeue", "skip", "sskip", "stop", "sstop"]:
+        await pesan.reply("🎵 Command musik sekarang pakai **Slash Command (`/`)** khusus Seraphine bro! Coba ketik `/splay`, `/squeue`, `/sskip`, atau `/sstop` 😉")
         return
 
     # ============================================================
     #  DEFAULT AI CHAT
     # ============================================================
+    if not cfg.get("ai_chat_enabled", True):
+        return
+
     async with pesan.channel.typing():
         jawaban = tanya_ai(pertanyaan, pesan.author.id, pesan.author.name, include_trending=False)
     
