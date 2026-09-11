@@ -634,7 +634,7 @@ def fetch_trending_news() -> str:
 #  AI FUNCTIONS (MERGED & OPTIMIZED)
 # ============================================================
 
-def tanya_ai(pertanyaan: str, user_id: int, user_name: str, include_trending: bool = False) -> str:
+async def tanya_ai(pertanyaan: str, user_id: int, user_name: str, include_trending: bool = False) -> str:
     """
     Send question to OpenRouter with optional trending news context.
     Merged function replacing both tanya_ai and tanya_ai_dengan_trending.
@@ -644,7 +644,8 @@ def tanya_ai(pertanyaan: str, user_id: int, user_name: str, include_trending: bo
         context_parts = [KEPRIBADIAN]
         
         if include_trending:
-            berita = fetch_trending_news()
+            # Jalankan di thread terpisah supaya event loop tetap responsif
+            berita = await asyncio.to_thread(fetch_trending_news)
             context_parts.append(f"Berita Trending Saat Ini:\n{berita}")
         
         history = get_user_history(user_id)
@@ -669,12 +670,22 @@ def tanya_ai(pertanyaan: str, user_id: int, user_name: str, include_trending: bo
         }
         
         logger.info(f"Requesting AI response for user {user_id}")
-        res = requests.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            json=data,
-            headers=headers,
-            timeout=60
-        )
+        # requests.post sinkron nge-block event loop Discord -> bot freeze.
+        # Jalankan di thread terpisah biar bot tetap responsif.
+        try:
+            res = await asyncio.wait_for(
+                asyncio.to_thread(
+                    requests.post,
+                    f"{OPENROUTER_BASE_URL}/chat/completions",
+                    json=data,
+                    headers=headers,
+                    timeout=45
+                ),
+                timeout=50
+            )
+        except asyncio.TimeoutError:
+            logger.warning("OpenRouter timeout (async guard)")
+            return "⏱️ AI sedang load, coba lagi dalam beberapa detik"
         hasil = res.json()
         
         if "error" in hasil:
@@ -1022,7 +1033,7 @@ async def on_message(pesan):
     # ============================================================
     if command == "trending":
         async with pesan.channel.typing():
-            jawaban = tanya_ai(
+            jawaban = await tanya_ai(
                 "Apa yang trending hari ini? Berikan penjelasan singkat tentang trending topics terkini.",
                 pesan.author.id,
                 pesan.author.name,
@@ -1269,7 +1280,7 @@ async def on_message(pesan):
         return
 
     async with pesan.channel.typing():
-        jawaban = tanya_ai(pertanyaan, pesan.author.id, pesan.author.name, include_trending=False)
+        jawaban = await tanya_ai(pertanyaan, pesan.author.id, pesan.author.name, include_trending=False)
     
     jawaban = truncate_response(jawaban)
     
