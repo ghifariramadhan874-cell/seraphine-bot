@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 .DS_Store
 node_modules/
+
+# cookies yt-dlp (sensitif, jangan di-commit)
+cookies.txt
+.ytdlp_cookies.txt
