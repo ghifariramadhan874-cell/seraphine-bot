@@ -434,6 +434,9 @@ def init_db():
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
 
+# Initialize DB on module load so dashboard/Railway imports create tables automatically
+init_db()
+
 def save_conversation(user_id: int, user_msg: str, bot_response: str):
     """Save conversation to database."""
     try:
@@ -506,6 +509,10 @@ def get_user_history(user_id: int, limit: int = MAX_HISTORY_MESSAGES) -> str:
         return "\n\n".join(history)
     except Exception as e:
         logger.error(f"Error getting history: {e}")
+        try:
+            init_db()
+        except:
+            pass
         return ""
 
 # ============================================================
