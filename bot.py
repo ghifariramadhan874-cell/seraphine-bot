@@ -332,14 +332,28 @@ async def slash_play(interaction: discord.Interaction, query: str):
                 description=f"[{player.title}]({player.url})",
                 color=0x7289da
             )
-            await interaction.followup.send(embed=embed)
+            try:
+                await interaction.followup.send(embed=embed)
+            except:
+                await interaction.channel.send(embed=embed)
         else:
             music_queues[interaction.guild.id].append(player)
-            await interaction.followup.send(f"✅ Menambahkan ke antrean: **{player.title}** (Urutan ke-{len(music_queues[interaction.guild.id])})")
+            msg = f"✅ Menambahkan ke antrean: **{player.title}** (Urutan ke-{len(music_queues[interaction.guild.id])})"
+            try:
+                await interaction.followup.send(msg)
+            except:
+                await interaction.channel.send(msg)
 
     except Exception as e:
         logger.error(f"Music Error: {e}")
-        await interaction.followup.send(f"❌ Aduh, error pas putar musik: {str(e)[:100]}")
+        err_msg = f"❌ Aduh, error pas putar musik: {str(e)[:100]}"
+        try:
+            await interaction.followup.send(err_msg)
+        except:
+            try:
+                await interaction.channel.send(err_msg)
+            except:
+                pass
 
 @tree.command(name="squeue", description="Lihat antrean musik (Seraphine)")
 async def slash_queue(interaction: discord.Interaction):
