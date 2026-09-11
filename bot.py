@@ -314,16 +314,16 @@ async def slash_play(interaction: discord.Interaction, query: str):
 
     try:
         voice_client = interaction.guild.voice_client
-        if not voice_client or not voice_client.is_connected():
-            if interaction.guild.voice_client:
+        if voice_client and voice_client.is_connected():
+            if voice_client.channel != interaction.user.voice.channel:
+                await voice_client.move_to(interaction.user.voice.channel)
+        else:
+            if voice_client:
                 try:
-                    await interaction.guild.voice_client.disconnect(force=True)
+                    await voice_client.disconnect(force=True)
                 except:
                     pass
             voice_client = await interaction.user.voice.channel.connect()
-        else:
-            if voice_client.channel != interaction.user.voice.channel:
-                await voice_client.move_to(interaction.user.voice.channel)
 
         player = await YTDLSource.from_url(query, loop=client.loop, stream=True)
         
@@ -348,6 +348,12 @@ async def slash_play(interaction: discord.Interaction, query: str):
 
     except Exception as e:
         logger.error(f"Music Error: {e}")
+        try:
+            if interaction.guild.voice_client and interaction.guild.voice_client.is_connected():
+                await interaction.guild.voice_client.disconnect(force=True)
+        except:
+            pass
+
         err_msg = f"❌ Aduh, error pas putar musik: {str(e)[:100]}"
         try:
             await interaction.followup.send(err_msg)
