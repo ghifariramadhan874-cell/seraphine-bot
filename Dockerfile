@@ -11,7 +11,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsodium23 \
       libffi8 \
       ca-certificates \
+      curl \
+      unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Deno runtime untuk yt-dlp n-challenge solver (EJS)
+RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip \
+    && unzip -o /tmp/deno.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/deno \
+    && rm /tmp/deno.zip \
+    && deno --version
 
 WORKDIR /app
 
