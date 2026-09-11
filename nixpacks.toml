@@ -1,8 +1,9 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "libsodium", "libffi"]
+nixPkgs = ["ffmpeg", "libsodium", "libsodium-dev", "libffi", "pkg-config"]
 
 [phases.build]
-cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+envs = { SODIUM_INSTALL = "system" }
+cmds = ["pip install --upgrade pip", "pip install --no-cache-dir -r requirements.txt"]
 
 [start]
 cmd = "uvicorn dashboard:app --host 0.0.0.0 --port $PORT"
