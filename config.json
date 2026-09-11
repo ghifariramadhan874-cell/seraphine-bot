@@ -2,5 +2,5 @@
     "ai_chat_enabled": true,
     "music_enabled": true,
     "automod_enabled": true,
-    "voice_log_enabled": true
+    "voice_log_enabled": false
 }

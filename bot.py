@@ -16,6 +16,8 @@ import requests
 import sqlite3
 import logging
 import os
+import certifi
+os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ["PATH"] += os.pathsep + os.getcwd()
 import asyncio
 import yt_dlp
@@ -121,7 +123,7 @@ MOD_LOG_CHANNEL_NAME = os.getenv("MOD_LOG_CHANNEL", "moderator-only").strip()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NEWSAPI_BASE_URL = "https://newsapi.org/v2"
-AI_MODEL = "openai/gpt-3.5-turbo"
+AI_MODEL = "deepseek/deepseek-chat"
 
 DB_NAME = "bot_memory.db"
 MAX_HISTORY_MESSAGES = 2  # Context messages (optimized)
@@ -297,21 +299,29 @@ tree = app_commands.CommandTree(client)
 @tree.command(name="splay", description="Putar musik dari YouTube (Seraphine)")
 @app_commands.describe(query="Judul lagu atau URL YouTube")
 async def slash_play(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
+
     cfg = load_bot_config()
     if not cfg.get("music_enabled", True):
-        await interaction.response.send_message("❌ Fitur Musik sedang dinonaktifkan via Dashboard bro!", ephemeral=True)
+        await interaction.followup.send("❌ Fitur Musik sedang dinonaktifkan via Dashboard bro!", ephemeral=True)
         return
 
     if not interaction.user.voice:
-        await interaction.response.send_message("❌ Kamu harus join voice channel dulu bro!", ephemeral=True)
+        await interaction.followup.send("❌ Kamu harus join voice channel dulu bro!", ephemeral=True)
         return
-
-    await interaction.response.defer()
 
     try:
         voice_client = interaction.guild.voice_client
-        if not voice_client:
+        if not voice_client or not voice_client.is_connected():
+            if interaction.guild.voice_client:
+                try:
+                    await interaction.guild.voice_client.disconnect(force=True)
+                except:
+                    pass
             voice_client = await interaction.user.voice.channel.connect()
+        else:
+            if voice_client.channel != interaction.user.voice.channel:
+                await voice_client.move_to(interaction.user.voice.channel)
 
         player = await YTDLSource.from_url(query, loop=client.loop, stream=True)
         
