@@ -33,26 +33,89 @@ from better_profanity import profanity
 #  MUSIC PLAYER CONFIG
 # ============================================================
 
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-}
+ytdl_log = logging.getLogger(__name__)
+
+def _get_cookies_file():
+    """Ambil cookies YouTube dari env var YOUTUBE_COOKIES (format Netscape) atau file cookies.txt."""
+    env_cookies = (os.environ.get('YOUTUBE_COOKIES') or '').strip()
+    if env_cookies:
+        try:
+            path = os.path.join(os.getcwd(), '.ytdlp_cookies.txt')
+            content = env_cookies.replace('\\n', '\n')
+            with open(path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(content)
+            return path
+        except Exception as e:
+            ytdl_log.warning(f"Gagal menulis YOUTUBE_COOKIES ke file: {e}")
+    for candidate in ('cookies.txt', '.ytdlp_cookies.txt'):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+COOKIES_FILE = _get_cookies_file()
+if COOKIES_FILE:
+    ytdl_log.info(f"Menggunakan cookies YouTube dari: {COOKIES_FILE}")
+
+def _make_ytdl(player_clients=None):
+    opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+        'restrictfilenames': True,
+        'noplaylist': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'quiet': True,
+        'no_warnings': True,
+        'default_search': 'auto',
+        'source_address': '0.0.0.0',
+    }
+    if player_clients:
+        opts['extractor_args'] = {'youtube': {'player_client': player_clients}}
+    if COOKIES_FILE:
+        opts['cookiefile'] = COOKIES_FILE
+    return yt_dlp.YoutubeDL(opts)
+
+# Instance default
+ytdl = _make_ytdl()
+
+# Urutan fallback player_client YouTube saat kena bot-check / age-gate
+_YTDL_FALLBACK_CLIENTS = [
+    ['tv'],
+    ['android', 'ios'],
+    ['tv_embedded'],
+    ['mweb'],
+]
+
+_BOT_CHECK_MARKERS = (
+    "sign in to confirm",
+    "not a bot",
+    "confirm your age",
+    "age-restricted",
+    "request was sent to youtube",
+)
+
+def _extract_info_with_fallback(url, download):
+    """extract_info dengan retry pakai player_client alternatif kalau kena bot-check YouTube."""
+    attempts = [None] + _YTDL_FALLBACK_CLIENTS
+    last_err = None
+    for clients in attempts:
+        extractor = ytdl if clients is None else _make_ytdl(clients)
+        try:
+            return extractor.extract_info(url, download=download)
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            if any(marker in msg for marker in _BOT_CHECK_MARKERS):
+                ytdl_log.warning(f"YouTube bot-check/age-gate, coba fallback player_client={clients}")
+                continue
+            raise
+    raise last_err
 
 ffmpeg_options = {
     'options': '-vn',
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
 }
-
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -64,8 +127,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        
+        data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(url, download=not stream))
+
         if 'entries' in data:
             data = data['entries'][0]
 
