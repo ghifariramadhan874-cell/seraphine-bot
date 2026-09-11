@@ -79,12 +79,17 @@ def _make_ytdl(player_clients=None):
 # Instance default
 ytdl = _make_ytdl()
 
-# Urutan fallback player_client YouTube saat kena bot-check / age-gate
+# Urutan fallback player_client YouTube (Sep 2026): dari IP datacenter Railway,
+# client web default & tv selalu kena bot-check/403 saat download; yang terbukti
+# lolos download langsung: web_embedded & tv_embedded. 'default' dipindah ke
+# akhir sebagai opsi terakhir.
 _YTDL_FALLBACK_CLIENTS = [
+    ['web_embedded'],
+    ['tv_embedded'],
     ['tv'],
     ['android', 'ios'],
-    ['tv_embedded'],
     ['mweb'],
+    [None],  # default (web) — terakhir karena URL-nya sering 403 walau ekstraksi sukses
 ]
 
 _BOT_CHECK_MARKERS = (
@@ -93,28 +98,55 @@ _BOT_CHECK_MARKERS = (
     "confirm your age",
     "age-restricted",
     "request was sent to youtube",
+    "403",
+    "forbidden",
 )
 
+_FFMPEG_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def _probe_stream_url(url):
+    """HEAD/Range GET kecil ke URL stream: True kalau googlevideo nerima (bukan 403)."""
+    try:
+        r = requests.get(url, headers={'User-Agent': _FFMPEG_UA},
+                         stream=True, timeout=8, allow_redirects=True)
+        ok = r.status_code == 200
+        r.close()
+        return ok
+    except Exception:
+        return False
+
+
 def _extract_info_with_fallback(url, download):
-    """extract_info dengan retry pakai player_client alternatif kalau kena bot-check YouTube."""
+    """extract_info dengan retry pakai player_client alternatif kalau kena bot-check
+    YouTube ATAU URL stream-nya ditolak (403) saat mau di-download/stream ffmpeg."""
     attempts = [None] + _YTDL_FALLBACK_CLIENTS
     last_err = None
     for clients in attempts:
         extractor = ytdl if clients is None else _make_ytdl(clients)
         try:
-            return extractor.extract_info(url, download=download)
+            data = extractor.extract_info(url, download=download)
+            if data and not download and 'entries' not in data:
+                # Stream mode: pastiin URL-nya gak 403 sebelum dikasih ke ffmpeg.
+                stream_url = data.get('url')
+                if stream_url and not _probe_stream_url(stream_url):
+                    ytdl_log.warning(
+                        f"URL stream ditolak (403) untuk player_client={clients}, fallback ke client lain")
+                    continue
+            return data
         except Exception as e:
             last_err = e
             msg = str(e).lower()
             if any(marker in msg for marker in _BOT_CHECK_MARKERS):
                 ytdl_log.warning(f"YouTube bot-check/age-gate, coba fallback player_client={clients}")
                 continue
-            raise
     raise last_err
 
 ffmpeg_options = {
     'options': '-vn',
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'before_options': ('-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
+                       f'-user_agent "{_FFMPEG_UA}"'),
 }
 
 class YTDLSource(discord.PCMVolumeTransformer):
