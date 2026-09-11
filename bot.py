@@ -16,7 +16,9 @@ import requests
 import sqlite3
 import logging
 import os
+import ssl
 import certifi
+ssl._create_default_https_context = ssl._create_unverified_context
 os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ["PATH"] += os.pathsep + os.getcwd()
 import asyncio
