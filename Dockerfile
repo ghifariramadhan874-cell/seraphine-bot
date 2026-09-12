@@ -9,7 +9,11 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       libsodium23 \
+      libsodium-dev \
       libffi8 \
+      libffi-dev \
+      build-essential \
+      python3-dev \
       ca-certificates \
       curl \
       unzip \
