@@ -36,12 +36,21 @@ from better_profanity import profanity
 ytdl_log = logging.getLogger(__name__)
 
 def _get_cookies_file():
-    """Ambil cookies YouTube dari env var YOUTUBE_COOKIES (format Netscape) atau file cookies.txt."""
-    env_cookies = (os.environ.get('YOUTUBE_COOKIES') or '').strip()
+    """Ambil cookies YouTube dari env var YOUTUBE_COOKIES (b64 atau raw) atau file cookies.txt."""
+    import base64
+    env_cookies = (os.environ.get('YOUTUBE_COOKIES') or os.environ.get('YOUTUBE_COOKIES_B64') or '').strip()
     if env_cookies:
         try:
             path = os.path.join(os.getcwd(), '.ytdlp_cookies.txt')
-            content = env_cookies.replace('\\n', '\n')
+            content = env_cookies
+            try:
+                decoded = base64.b64decode(env_cookies.encode('utf-8')).decode('utf-8')
+                if '.youtube.com' in decoded:
+                    content = decoded
+            except Exception:
+                pass
+            
+            content = content.replace('\\n', '\n')
             with open(path, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(content)
             return path
