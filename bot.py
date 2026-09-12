@@ -67,6 +67,7 @@ if COOKIES_FILE:
     ytdl_log.info(f"Menggunakan cookies YouTube dari: {COOKIES_FILE}")
 
 def _make_ytdl(player_clients=None):
+    cookies_file = _get_cookies_file()
     opts = {
         'format': 'bestaudio/best',
         'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -82,11 +83,11 @@ def _make_ytdl(player_clients=None):
     }
     if player_clients:
         opts['extractor_args'] = {'youtube': {'player_client': player_clients}}
-    if COOKIES_FILE:
-        opts['cookiefile'] = COOKIES_FILE
+    if cookies_file:
+        opts['cookiefile'] = cookies_file
     return yt_dlp.YoutubeDL(opts)
 
-# Instance default
+ytdl = _make_ytdl()
 ytdl = _make_ytdl()
 
 # Urutan fallback player_client YouTube (Sep 2026): dari IP datacenter Railway,
@@ -147,7 +148,7 @@ def _extract_info_with_fallback(url, download):
             return data
         except Exception as e:
             last_err = e
-            msg = str(e).lower()
+            msg = str(e or '').lower()
             if any(marker in msg for marker in _BOT_CHECK_MARKERS):
                 ytdl_log.warning(f"YouTube bot-check/age-gate, coba fallback player_client={clients}")
                 continue
