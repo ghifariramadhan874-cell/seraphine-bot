@@ -505,6 +505,62 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 # ============================================================
+#  VOICE MODERATION COMMANDS (VMUTE / VUNMUTE)
+# ============================================================
+
+@tree.command(name="vmute", description="Mute member di voice channel secara paksa")
+@app_commands.describe(member="Member yang mau di-mute", reason="Alasan mute")
+@app_commands.checks.has_permissions(mute_members=True)
+async def slash_vmute(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    if not interaction.guild:
+        await interaction.response.send_message("❌ Perintah ini cuma bisa dipakai di server Discord bro!", ephemeral=True)
+        return
+
+    if not member.voice or not member.voice.channel:
+        await interaction.response.send_message(f"❌ **{member.display_name}** lagi gak ada di voice channel mana pun!", ephemeral=True)
+        return
+
+    try:
+        await member.edit(mute=True, reason=reason)
+        embed = discord.Embed(
+            title="🔇 Voice Muted",
+            description=f"Berhasil server-mute **{member.mention}** di voice channel **{member.voice.channel.name}**.\n📝 **Alasan:** {reason}",
+            color=0xFF5733,
+            timestamp=datetime.now()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+        logger.info(f"User {member.name} muted in voice by {interaction.user.name}")
+    except Exception as e:
+        logger.error(f"Error in vmute: {e}")
+        await interaction.response.send_message(f"❌ Gagal nge-mute member: {e}", ephemeral=True)
+
+@tree.command(name="vunmute", description="Lepas mute member di voice channel")
+@app_commands.describe(member="Member yang mau di-unmute")
+@app_commands.checks.has_permissions(mute_members=True)
+async def slash_vunmute(interaction: discord.Interaction, member: discord.Member):
+    if not interaction.guild:
+        await interaction.response.send_message("❌ Perintah ini cuma bisa dipakai di server Discord bro!", ephemeral=True)
+        return
+
+    if not member.voice or not member.voice.channel:
+        await interaction.response.send_message(f"❌ **{member.display_name}** lagi gak ada di voice channel!", ephemeral=True)
+        return
+
+    try:
+        await member.edit(mute=False)
+        embed = discord.Embed(
+            title="🔊 Voice Unmuted",
+            description=f"Berhasil melepas server-mute untuk **{member.mention}** di voice channel **{member.voice.channel.name}**.",
+            color=0x2ECC71,
+            timestamp=datetime.now()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+        logger.info(f"User {member.name} unmuted in voice by {interaction.user.name}")
+    except Exception as e:
+        logger.error(f"Error in vunmute: {e}")
+        await interaction.response.send_message(f"❌ Gagal melepas mute member: {e}", ephemeral=True)
+
+# ============================================================
 #  MUSIC SLASH COMMANDS
 # ============================================================
 
