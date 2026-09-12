@@ -16,6 +16,7 @@ import requests
 import sqlite3
 import logging
 import os
+import random
 import ssl
 import certifi
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -230,6 +231,49 @@ class MusicControlView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ Bot lagi gak ada di channel.", ephemeral=True)
 
+AUTOPLAY_POOL = [
+    "lofi hip hop radio - beats to relax/study to",
+    "chill lofi mix relax music",
+    "dj remix viral terbaru enak",
+    "synthwave radio - chill synth / retro beats",
+    "acoustic guitar pop hits cover",
+    "japanese city pop mix",
+    "top hits indonesia santai",
+]
+
+async def _autoplay_next(guild_id, voice_client, channel):
+    if not voice_client or not voice_client.is_connected():
+        return
+    query = random.choice(AUTOPLAY_POOL)
+    try:
+        search_query = f"ytsearch1:{query}"
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(search_query, download=False))
+        if 'entries' in data:
+            data = data['entries'][0]
+            if not data.get('url'):
+                video_url = data.get('webpage_url') or f"https://www.youtube.com/watch?v={data.get('id')}"
+                data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(video_url, download=False))
+                if 'entries' in data:
+                    data = data['entries'][0]
+        
+        webpage_url = data.get('webpage_url') or f"https://www.youtube.com/watch?v={data.get('id')}"
+        if not webpage_url:
+            return
+            
+        player = await YTDLSource.from_url(webpage_url, loop=client.loop, stream=True)
+        if voice_client and not voice_client.is_playing():
+            voice_client.play(player, after=lambda e: play_next(guild_id, voice_client, channel))
+            view = MusicControlView(guild_id)
+            embed = discord.Embed(
+                title="🎵 Autoplay (Musik Random Rekomendasi)",
+                description=f"Antrean habis, bot otomatis memutar: [{player.title}]({player.url})",
+                color=0x7289da
+            )
+            await channel.send(embed=embed, view=view)
+    except Exception as e:
+        logger.error(f"Autoplay error: {e}")
+
 def play_next(guild_id, voice_client, channel):
     if music_queues[guild_id]:
         next_player = music_queues[guild_id].pop(0)
@@ -247,6 +291,8 @@ def play_next(guild_id, voice_client, channel):
             future.result(timeout=5)
         except Exception as e:
             logger.error(f"Error in play_next: {e}")
+    else:
+        asyncio.run_coroutine_threadsafe(_autoplay_next(guild_id, voice_client, channel), client.loop)
 
 # Load environment variables
 load_dotenv()
