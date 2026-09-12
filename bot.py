@@ -191,17 +191,57 @@ class YTDLSource(discord.PCMVolumeTransformer):
 # Antrean musik per server
 music_queues = defaultdict(list)
 
+class MusicControlView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Pause/Resume", style=discord.ButtonStyle.primary, emoji="⏯️")
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if not voice_client:
+            await interaction.response.send_message("❌ Bot lagi gak ada di voice channel.", ephemeral=True)
+            return
+        if voice_client.is_playing():
+            voice_client.pause()
+            await interaction.response.send_message("⏸️ Musik dipause.", ephemeral=True)
+        elif voice_client.is_paused():
+            voice_client.resume()
+            await interaction.response.send_message("▶️ Musik dilanjutkan.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Gak ada musik yang lagi diputar.", ephemeral=True)
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="⏭️")
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+            await interaction.response.send_message("⏭️ Lagu di-skip!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Gak ada lagu yang lagi diputar.", ephemeral=True)
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if voice_client:
+            await voice_client.disconnect()
+            music_queues[self.guild_id] = []
+            await interaction.response.send_message("🛑 Musik dihentikan dan bot disconnect.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Bot lagi gak ada di channel.", ephemeral=True)
+
 def play_next(guild_id, voice_client, channel):
     if music_queues[guild_id]:
         next_player = music_queues[guild_id].pop(0)
         try:
             voice_client.play(next_player, after=lambda e: play_next(guild_id, voice_client, channel))
+            view = MusicControlView(guild_id)
             future = asyncio.run_coroutine_threadsafe(
                 channel.send(embed=discord.Embed(
                     title="🎵 Sekarang Diputar (Dari Antrean)",
                     description=f"[{next_player.title}]({next_player.url})",
                     color=0x7289da
-                )),
+                ), view=view),
                 client.loop
             )
             future.result(timeout=5)
@@ -455,10 +495,11 @@ async def slash_play(interaction: discord.Interaction, query: str):
                 description=f"[{player.title}]({player.url})",
                 color=0x7289da
             )
+            view = MusicControlView(interaction.guild.id)
             try:
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, view=view)
             except:
-                await interaction.channel.send(embed=embed)
+                await interaction.channel.send(embed=embed, view=view)
         else:
             music_queues[interaction.guild.id].append(player)
             msg = f"✅ Menambahkan ke antrean: **{player.title}** (Urutan ke-{len(music_queues[interaction.guild.id])})"
