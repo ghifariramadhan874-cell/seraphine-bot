@@ -403,22 +403,27 @@ async def slash_play(interaction: discord.Interaction, query: str):
         await interaction.followup.send("❌ Fitur Musik sedang dinonaktifkan via Dashboard bro!", ephemeral=True)
         return
 
-    if not interaction.user.voice:
+    if not interaction.guild:
+        await interaction.followup.send("❌ Perintah ini cuma bisa dipakai di server Discord bro!", ephemeral=True)
+        return
+
+    member = interaction.guild.get_member(interaction.user.id)
+    if not member or not member.voice or not member.voice.channel:
         await interaction.followup.send("❌ Kamu harus join voice channel dulu bro!", ephemeral=True)
         return
 
     try:
         voice_client = interaction.guild.voice_client
         if voice_client and voice_client.is_connected():
-            if voice_client.channel != interaction.user.voice.channel:
-                await voice_client.move_to(interaction.user.voice.channel)
+            if voice_client.channel != member.voice.channel:
+                await voice_client.move_to(member.voice.channel)
         else:
             if voice_client:
                 try:
                     await voice_client.disconnect(force=True)
                 except:
                     pass
-            voice_client = await interaction.user.voice.channel.connect()
+            voice_client = await member.voice.channel.connect()
 
         player = await YTDLSource.from_url(query, loop=client.loop, stream=True)
         
