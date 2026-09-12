@@ -168,12 +168,24 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
+        
+        if not url.startswith(('http://', 'https://', 'www.')):
+            if not url.startswith('ytsearch'):
+                url = f"ytsearch1:{url}"
+
         data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(url, download=not stream))
 
         if 'entries' in data:
             data = data['entries'][0]
+            if not data.get('url'):
+                video_url = data.get('webpage_url') or f"https://www.youtube.com/watch?v={data.get('id')}"
+                data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(video_url, download=not stream))
+                if 'entries' in data:
+                    data = data['entries'][0]
 
-        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        filename = data.get('url') if stream else ytdl.prepare_filename(data)
+        if not filename:
+            raise Exception("Gagal mendapatkan URL stream / file dari YouTube.")
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
 # Antrean musik per server
