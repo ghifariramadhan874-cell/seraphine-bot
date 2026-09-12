@@ -28,6 +28,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from collections import defaultdict
 import time
+import traceback
 from better_profanity import profanity
 
 # ============================================================
@@ -91,14 +92,15 @@ ytdl = _make_ytdl()
 ytdl = _make_ytdl()
 
 # Urutan fallback player_client YouTube (Sep 2026): dari IP datacenter Railway,
-# client web default & tv selalu kena bot-check/403 saat download; yang terbukti
-# lolos download langsung: web_embedded & tv_embedded. 'default' dipindah ke
-# akhir sebagai opsi terakhir.
+# client 'web' default & 'tv' selalu kena bot-check/403; yang terbukti paling
+# robust dari uji lokal: 'android' (beri direct stream URL mp4, bypass SABR),
+# lalu 'tv_embedded'/'web_embedded'. 'default' dipindah ke akhir sebagai opsi terakhir.
 _YTDL_FALLBACK_CLIENTS = [
+    ['android'],
+    ['android', 'ios'],
     ['web_embedded'],
     ['tv_embedded'],
     ['tv'],
-    ['android', 'ios'],
     ['mweb'],
     [None],  # default (web) — terakhir karena URL-nya sering 403 walau ekstraksi sukses
 ]
@@ -152,6 +154,11 @@ def _extract_info_with_fallback(url, download):
             if any(marker in msg for marker in _BOT_CHECK_MARKERS):
                 ytdl_log.warning(f"YouTube bot-check/age-gate, coba fallback player_client={clients}")
                 continue
+            if 'no longer valid' in msg or 'rotated' in msg or 'reloaded' in msg:
+                ytdl_log.warning(
+                    f"YouTube cookie kemungkinan KADALUARSA/dirotasi (msg={msg[:80]}). "
+                    f"REFRESH YOUTUBE_COOKIES di Railway dashboard supaya bot-check lobos.")
+                continue
     raise last_err
 
 ffmpeg_options = {
@@ -187,10 +194,15 @@ class YTDLSource(discord.PCMVolumeTransformer):
             filename = data.get('url')
             if not filename:
                 raise Exception("No stream URL")
-        except Exception:
+        except Exception as e:
+            logger.error(f"from_url stream-retry menuju download=True: {e}")
             data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(url, download=True))
+            if not data:
+                raise Exception("YouTube extraction kosong total (semua player_client gagal) — cek YOUTUBE_COOKIES / koneksi")
             if 'entries' in data:
                 data = data['entries'][0]
+            if not data:
+                raise Exception("YouTube extraction kosong (entries kosong)")
             filename = ytdl.prepare_filename(data)
 
         if not filename:
@@ -619,7 +631,7 @@ async def slash_play(interaction: discord.Interaction, query: str):
                 await interaction.channel.send(msg)
 
     except Exception as e:
-        logger.error(f"Music Error: {e}")
+        logger.error(f"Music Error: {e}\n{traceback.format_exc()}")
         try:
             if interaction.guild.voice_client and interaction.guild.voice_client.is_connected():
                 await interaction.guild.voice_client.disconnect(force=True)
