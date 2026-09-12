@@ -175,17 +175,24 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not url.startswith('ytsearch'):
                 url = f"ytsearch1:{url}"
 
-        data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(url, download=not stream))
+        try:
+            data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(url, download=False))
+            if 'entries' in data:
+                data = data['entries'][0]
+                if not data.get('url'):
+                    video_url = data.get('webpage_url') or f"https://www.youtube.com/watch?v={data.get('id')}"
+                    data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(video_url, download=False))
+                    if 'entries' in data:
+                        data = data['entries'][0]
+            filename = data.get('url')
+            if not filename:
+                raise Exception("No stream URL")
+        except Exception:
+            data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(url, download=True))
+            if 'entries' in data:
+                data = data['entries'][0]
+            filename = ytdl.prepare_filename(data)
 
-        if 'entries' in data:
-            data = data['entries'][0]
-            if not data.get('url'):
-                video_url = data.get('webpage_url') or f"https://www.youtube.com/watch?v={data.get('id')}"
-                data = await loop.run_in_executor(None, lambda: _extract_info_with_fallback(video_url, download=not stream))
-                if 'entries' in data:
-                    data = data['entries'][0]
-
-        filename = data.get('url') if stream else ytdl.prepare_filename(data)
         if not filename:
             raise Exception("Gagal mendapatkan URL stream / file dari YouTube.")
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
